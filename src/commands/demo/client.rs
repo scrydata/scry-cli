@@ -141,6 +141,16 @@ impl DemoClient {
             }
 
             let body_text = resp.text().await.unwrap_or_default();
+
+            // Retry on 500 with transient backend errors (e.g. SQLite lock contention)
+            if status == StatusCode::INTERNAL_SERVER_ERROR
+                && attempt < max_retries
+                && body_text.contains("database is locked")
+            {
+                last_err = Some(format!("HTTP {status}: {body_text}"));
+                continue;
+            }
+
             return Err(DemoError::ApiResponse {
                 method: method.to_string(),
                 url,

@@ -561,6 +561,8 @@ async fn run_steps(
         let _ = client
             .delete(&format!("/api/v1/replays/{replay_id}"))
             .await;
+        // Grace period for the backend to release SQLite locks from the previous replay
+        tokio::time::sleep(Duration::from_secs(3)).await;
     }
 
     terminal::print_step("Re-running replay with fix applied...");
