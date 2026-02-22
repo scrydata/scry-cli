@@ -1,0 +1,33 @@
+-- Index Drop Scenario: The Fix
+--
+-- Recreate the dropped index. Use CONCURRENTLY to avoid blocking.
+
+CREATE INDEX CONCURRENTLY idx_orders_status_created ON orders(status, created_at);
+
+-- Lessons learned:
+--
+-- 1. Don't trust pg_stat_user_indexes alone
+--    - Stats reset on restart/failover
+--    - Use pg_stat_statements to see query patterns
+--
+-- 2. Before dropping an index, test with Scry:
+--    - Drop on shadow, replay production workload
+--    - See which queries regress
+--
+-- 3. Consider a "soft drop" workflow:
+--    - Mark index as INVALID first
+--    - Monitor for a week
+--    - Actually drop if no issues
+--
+-- 4. Query to find index usage more reliably:
+--
+--    SELECT
+--        schemaname || '.' || relname AS table,
+--        indexrelname AS index,
+--        idx_scan,
+--        pg_size_pretty(pg_relation_size(indexrelid)) AS size
+--    FROM pg_stat_user_indexes
+--    WHERE idx_scan < 100
+--    ORDER BY pg_relation_size(indexrelid) DESC;
+--
+--    But always validate against actual query patterns!

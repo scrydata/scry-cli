@@ -1,0 +1,197 @@
+# Scry Demo Stack
+#
+# Runs the complete Scry ecosystem locally:
+# - source-postgres: Sample e-commerce database
+# - nats: Message queue with JetStream
+# - scry-platform: Replay engine and regression detection
+# - scry-backfill: CDC replication from source to shadow
+# - scry-proxy: Query capture proxy
+#
+# Usage:
+#   docker compose up -d
+#   ./demo.sh
+
+services:
+  # Source PostgreSQL with sample e-commerce data
+  source-postgres:
+    image: docker.io/library/postgres:15
+    container_name: scry-demo-source
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: demo
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./sample-data/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro,z
+      - ./sample-data/02-seed-data.sql:/docker-entrypoint-initdb.d/02-seed-data.sql:ro,z
+      - source_pgdata:/var/lib/postgresql/data
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_wal_senders=10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -h 127.0.0.1 && psql -U postgres -h 127.0.0.1 -d demo -tAc 'SELECT 1 FROM users LIMIT 1' | grep -q 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - scry-demo-net
+
+  # NATS with JetStream for event streaming
+  nats:
+    image: docker.io/library/nats:2.10-alpine
+    container_name: scry-demo-nats
+    command:
+      - "--js"
+      - "--sd=/data"
+      - "--http_port=8222"
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - scry-demo-net
+
+  # Scry Platform - replay engine and regression detection
+  scry-platform:
+    image: ghcr.io/scrydata/scry-platform-demo:latest
+    container_name: scry-demo-platform
+    environment:
+      RUST_LOG: info,scry_platform=debug
+      SCRY_PLATFORM_RECEIVER__LISTEN_ADDRESS: "0.0.0.0:8080"
+      SCRY_PLATFORM_RECEIVER__AUTH_TOKEN: "demo-token"
+      SCRY_PLATFORM_RECEIVER__API_KEYS: "demo-token"
+      SCRY_PLATFORM_API__LISTEN_ADDRESS: "0.0.0.0:8081"
+      SCRY_PLATFORM_API__AUTH_TOKEN: "demo-token"
+      SCRY_PLATFORM_API__ENABLE_SWAGGER_UI: "true"
+      SCRY_PLATFORM_QUEUE__BACKEND: "nats"
+      SCRY_PLATFORM_QUEUE__NATS__URL: "nats://nats:4222"
+      SCRY_PLATFORM_STORAGE__PATH: "/data/scry-platform.db"
+      SCRY_PLATFORM_SHADOW__PROVIDER: "docker"
+      SCRY_PLATFORM_SHADOW__NETWORK: "scry-demo-net"
+      SCRY_PLATFORM_SHADOW__PROVISIONING_TIMEOUT_SECS: "300"
+      # Disable storage-opt size limit (not supported on btrfs/ext4 without pquota)
+      SCRY_PLATFORM_SHADOW__DEFAULT_DISK_GB: "0"
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    volumes:
+      - platform_data:/data
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - scry-demo-net
+
+  # Scry Backfill - CDC replication from source to shadow
+  scry-backfill:
+    image: ghcr.io/scrydata/scry-backfill:latest
+    container_name: scry-demo-backfill
+    environment:
+      RUST_LOG: info,scry_backfill=debug
+      SCRY_BACKFILL_SOURCE__HOST: source-postgres
+      SCRY_BACKFILL_SOURCE__PORT: "5432"
+      SCRY_BACKFILL_SOURCE__DATABASE: demo
+      SCRY_BACKFILL_SOURCE__USER: postgres
+      SCRY_BACKFILL_SOURCE__PASSWORD: postgres
+      SCRY_BACKFILL_SOURCE__SSL_MODE: disable
+      SCRY_BACKFILL_SOURCE__REPLICATION_SLOT: scry_demo
+      SCRY_BACKFILL_SOURCE__PUBLICATION_NAME: scry_demo
+      SCRY_BACKFILL_BACKFILL__MODE: hybrid
+      SCRY_BACKFILL_PRODUCER__ENABLED: "true"
+      SCRY_BACKFILL_PRODUCER__ENDPOINT: "http://scry-platform:8080/events/cdc/binary"
+      SCRY_BACKFILL_PRODUCER__AUTH_TOKEN: "demo-token"
+      SCRY_BACKFILL_PRODUCER__SHADOW_ID: "00000000-0000-0000-0000-000000000001"
+    depends_on:
+      scry-platform:
+        condition: service_healthy
+      source-postgres:
+        condition: service_healthy
+    networks:
+      - scry-demo-net
+
+  # Scry Proxy - query capture
+  scry-proxy:
+    image: ghcr.io/scrydata/scry-proxy:latest
+    container_name: scry-demo-proxy
+    environment:
+      RUST_LOG: info,scry_proxy=debug
+      SCRY_PROXY__LISTEN_ADDRESS: "0.0.0.0:5434"
+      SCRY_PROXY__MAX_CONNECTIONS: "100"
+      SCRY_BACKEND__PROTOCOL: postgres
+      SCRY_BACKEND__HOST: source-postgres
+      SCRY_BACKEND__PORT: "5432"
+      SCRY_BACKEND__DATABASE: demo
+      SCRY_BACKEND__USER: postgres
+      SCRY_BACKEND__PASSWORD: postgres
+      SCRY_BACKEND__POOL_SIZE: "10"
+      SCRY_PUBLISHER__ENABLED: "true"
+      SCRY_PUBLISHER__PUBLISHER_TYPE: http
+      SCRY_PUBLISHER__HTTP_ENDPOINT: "http://scry-platform:8080/events/queries/binary"
+      SCRY_PUBLISHER__HTTP_API_KEY: "demo-token"
+      SCRY_PUBLISHER__ANONYMIZE: "false"
+      SCRY_PUBLISHER__BATCH_SIZE: "50"
+      SCRY_PUBLISHER__FLUSH_INTERVAL_MS: "1000"
+      SCRY_PUBLISHER__SHADOW_ID: "00000000-0000-0000-0000-000000000001"
+    ports:
+      - "5434:5434"
+      - "9091:9090"  # Prometheus metrics
+    depends_on:
+      scry-platform:
+        condition: service_healthy
+      source-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9090/metrics"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - scry-demo-net
+
+  # Scry Query Generator - synthetic query workload
+  query-generator:
+    image: ghcr.io/scrydata/scry-query-generator:latest
+    container_name: scry-demo-query-gen
+    environment:
+      RUST_LOG: info,scry_query_generator=debug
+      DATABASE_URL: postgres://postgres:postgres@scry-proxy:5434/demo
+      CONCURRENT_USERS: "5"
+      THINK_TIME_MS: "200"
+      CONNECTION_POOL_SIZE: "10"
+      SCENARIO: "default"
+    depends_on:
+      scry-proxy:
+        condition: service_healthy
+      source-postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - scry-demo-net
+
+volumes:
+  source_pgdata:
+  nats_data:
+  platform_data:
+
+networks:
+  scry-demo-net:
+    name: scry-demo-net
+    driver: bridge

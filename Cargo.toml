@@ -1,0 +1,51 @@
+[package]
+name = "scry-cli"
+version = "0.1.5"
+edition = "2021"
+license = "MIT"
+description = "CLI for scry-platform API"
+repository = "https://github.com/scrydata/scry-cli"
+
+[lib]
+name = "scry_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scry"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive", "env"] }
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "signal"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+dirs = "5.0"
+tabled = "0.16"
+thiserror = "1.0"
+anyhow = "1.0"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+glob = "0.3"
+chrono = "0.4"
+bytes = "1.5"
+futures = "0.3"
+tokio-stream = "0.1"
+hyper = { version = "1.0", features = ["client", "http2"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http2", "tokio"] }
+http-body-util = "0.1"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "native-tokio", "ring", "tls12"] }
+terminal_size = "0.4"
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
