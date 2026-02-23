@@ -2,7 +2,7 @@
 name = "scry-cli"
 version = "0.1.6"
 edition = "2021"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 description = "CLI for scry-platform API"
 repository = "https://github.com/scrydata/scry-cli"
 
