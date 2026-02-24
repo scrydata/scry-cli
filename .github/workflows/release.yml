@@ -24,6 +24,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
 
     runs-on: ${{ matrix.os }}
 
@@ -38,18 +41,22 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package (tar.gz)
+      - name: Package
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../scry-cli-${{ matrix.target }}.tar.gz scry
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a ../../../scry-cli-${{ matrix.target }}.zip scry.exe
+          else
+            tar czf ../../../scry-cli-${{ matrix.target }}.tar.gz scry
+          fi
           cd ../../..
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: scry-cli-${{ matrix.target }}
-          path: scry-cli-${{ matrix.target }}.tar.gz
+          path: scry-cli-${{ matrix.target }}.${{ matrix.archive }}
 
   release:
     needs: build
@@ -62,5 +69,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: scry-cli-*.tar.gz
+          files: |
+            scry-cli-*.tar.gz
+            scry-cli-*.zip
           generate_release_notes: true
