@@ -199,15 +199,26 @@ struct ConnectionResponse {
     pub port: u16,
     pub database: String,
     pub username: String,
-    pub password: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub connection_url: Option<String>,
 }
 
 impl ConnectionResponse {
     fn connection_string(&self) -> String {
-        format!(
-            "postgres://{}:{}@{}:{}/{}",
-            self.username, self.password, self.host, self.port, self.database
-        )
+        match &self.password {
+            Some(pw) => format!(
+                "postgres://{}:{}@{}:{}/{}",
+                self.username, pw, self.host, self.port, self.database
+            ),
+            None => self.connection_url.clone().unwrap_or_else(|| {
+                format!(
+                    "postgres://{}@{}:{}/{}",
+                    self.username, self.host, self.port, self.database
+                )
+            }),
+        }
     }
 }
 
@@ -1251,6 +1262,24 @@ pub fn parse_duration(s: &str) -> Result<Duration, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_response_tolerates_missing_password() {
+        // No password field, but connection_url present → deserializes + usable.
+        let json = r#"{"host":"h","port":5432,"database":"db","username":"u",
+            "connection_url":"postgres://u:pw@h:5432/db"}"#;
+        let resp: ConnectionResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.password.is_none());
+        assert_eq!(resp.connection_string(), "postgres://u:pw@h:5432/db");
+    }
+
+    #[test]
+    fn connection_response_uses_password_when_present() {
+        let json = r#"{"host":"h","port":5432,"database":"db","username":"u",
+            "password":"secret","connection_url":"postgres://ignored"}"#;
+        let resp: ConnectionResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.connection_string(), "postgres://u:secret@h:5432/db");
+    }
 
     #[test]
     fn test_parse_duration() {
