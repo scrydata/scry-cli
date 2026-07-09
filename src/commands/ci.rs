@@ -237,6 +237,16 @@ struct CheckpointsResponse {
     pub items: Vec<CheckpointInfo>,
 }
 
+/// Async checkpoint response (202) when a snapshot provider is configured.
+#[derive(Debug, Clone, Deserialize)]
+struct CheckpointJobResponse {
+    pub job_id: String,
+    #[allow(dead_code)]
+    pub status: String,
+    #[allow(dead_code)]
+    pub checkpoint_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReplayResponse {
     pub id: Uuid,
@@ -834,16 +844,86 @@ impl CiCommand {
             name: name.to_string(),
         };
 
-        let response: CheckpointInfo = client.post(&path, &request).await?;
+        let (status, body) = client.post_with_status(&path, &request).await?;
 
-        if !quiet {
-            eprintln!(
-                "Checkpoint '{}' created at journal position {}",
-                response.name, response.cdc_position
-            );
+        if status == reqwest::StatusCode::ACCEPTED {
+            // Async provider path: poll the job, then read the checkpoint back.
+            let job: CheckpointJobResponse = serde_json::from_value(body)
+                .map_err(|e| CliError::Api(format!("bad 202 body: {e}")))?;
+            Self::wait_for_job(client, &job.job_id, quiet).await?;
+            let cp = Self::get_checkpoint_by_name(client, shadow_id, name).await?;
+            if !quiet {
+                eprintln!(
+                    "Checkpoint '{}' created at journal position {}",
+                    cp.name, cp.cdc_position
+                );
+            }
+        } else {
+            // Synchronous provider="none" path: body is a CheckpointInfo.
+            let cp: CheckpointInfo = serde_json::from_value(body)
+                .map_err(|e| CliError::Api(format!("bad checkpoint body: {e}")))?;
+            if !quiet {
+                eprintln!(
+                    "Checkpoint '{}' created at journal position {}",
+                    cp.name, cp.cdc_position
+                );
+            }
         }
 
         Ok(())
+    }
+
+    /// Poll a job to a terminal state (completed/failed), mirroring the
+    /// `job.rs` polling shape (fixed interval, elapsed-based timeout).
+    async fn wait_for_job(
+        client: &ApiClient,
+        job_id: &str,
+        quiet: bool,
+    ) -> Result<(), CliError> {
+        use crate::commands::job::JobResponse;
+        let timeout = Duration::from_secs(300);
+        let poll = Duration::from_secs(2);
+        let start = std::time::Instant::now();
+        loop {
+            let resp: JobResponse = client.get(&format!("/api/v1/jobs/{}", job_id)).await?;
+            match resp.status.as_str() {
+                "completed" => return Ok(()),
+                "failed" => {
+                    return Err(CliError::Api(format!(
+                        "checkpoint job failed: {}",
+                        resp.error.unwrap_or_default()
+                    )))
+                }
+                s => {
+                    if start.elapsed() > timeout {
+                        return Err(CliError::Timeout(format!(
+                            "checkpoint job {job_id} timed out"
+                        )));
+                    }
+                    if !quiet {
+                        eprintln!("checkpoint job status: {s}...");
+                    }
+                    tokio::time::sleep(poll).await;
+                }
+            }
+        }
+    }
+
+    /// Read the named checkpoint back from the shadow's checkpoint list.
+    async fn get_checkpoint_by_name(
+        client: &ApiClient,
+        shadow_id: Uuid,
+        name: &str,
+    ) -> Result<CheckpointInfo, CliError> {
+        let list: CheckpointsResponse = client
+            .get(&format!("/api/v1/shadows/{}/checkpoints", shadow_id))
+            .await?;
+        list.items
+            .into_iter()
+            .find(|c| c.name == name)
+            .ok_or_else(|| {
+                CliError::Api(format!("checkpoint '{name}' not found after job completion"))
+            })
     }
 
     async fn connect(
@@ -1262,6 +1342,21 @@ pub fn parse_duration(s: &str) -> Result<Duration, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_job_response_decodes() {
+        let json = r#"{"job_id":"550e8400-e29b-41d4-a716-446655440000",
+            "status":"pending","checkpoint_id":"pre-migration"}"#;
+        let resp: CheckpointJobResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.checkpoint_id, "pre-migration");
+    }
+
+    #[test]
+    fn checkpoint_info_still_decodes_sync_path() {
+        let json = r#"{"name":"pre-migration","cdc_position":42,"created_at":0}"#;
+        let info: CheckpointInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.name, "pre-migration");
+    }
 
     #[test]
     fn connection_response_tolerates_missing_password() {

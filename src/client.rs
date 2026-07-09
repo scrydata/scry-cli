@@ -168,6 +168,35 @@ impl ApiClient {
         .await
     }
 
+    /// POST returning (status, body-as-json). Unlike `post`, a 202 is NOT an
+    /// error — the caller branches on the returned status. Non-2xx still errors
+    /// via `handle_error_response`. Single attempt (checkpoint POST is not
+    /// idempotent, so retry-on-timeout is intentionally omitted here).
+    pub async fn post_with_status<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<(StatusCode, serde_json::Value), CliError> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(body)
+            .send()
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            let value = response.json::<serde_json::Value>().await?;
+            Ok((status, value))
+        } else {
+            // handle_error_response is generic and always returns Err; the
+            // turbofish satisfies the type checker for the Ok variant.
+            self.handle_error_response::<(StatusCode, serde_json::Value)>(response)
+                .await
+        }
+    }
+
     /// Make a POST request without a body with retry logic.
     #[allow(dead_code)]
     pub async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, CliError> {
