@@ -335,9 +335,6 @@ async fn run_steps(
             database: "demo".to_string(),
         }
     } else {
-        // Create source if needed
-        ensure_source_registered(client).await?;
-
         // Create shadow if needed
         ensure_shadow_created(client).await?;
 
@@ -622,33 +619,6 @@ async fn run_steps(
 }
 
 // ─── API integration helpers ────────────────────────────────────────────────
-
-/// Register the demo source, tolerating 409 Conflict (already exists).
-async fn ensure_source_registered(client: &DemoClient) -> Result<(), DemoError> {
-    let source_resp = client.get("/api/v1/sources/demo/demo").await;
-    match source_resp {
-        Ok(ref v) if v.get("error").is_none() => {
-            // Source exists
-        }
-        _ => {
-            terminal::print_info("Registering source...");
-            match client
-                .post(
-                    "/api/v1/sources",
-                    &serde_json::json!({"project": "demo", "database": "demo"}),
-                )
-                .await
-            {
-                Ok(_) => {}
-                Err(DemoError::ApiResponse { status: 409, .. }) => {
-                    // Already exists, fine
-                }
-                Err(e) => return Err(e),
-            }
-        }
-    }
-    Ok(())
-}
 
 /// Create the demo shadow, tolerating 409 Conflict (already exists).
 async fn ensure_shadow_created(client: &DemoClient) -> Result<(), DemoError> {
