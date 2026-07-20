@@ -1,0 +1,44 @@
+name: Integration
+
+# Server-dependent `scry ci` flow tests (tests/ci_workflow.rs #[ignore]d cases).
+# ci.yml runs `cargo test` with no --ignored, so these never run there. Stand up
+# NATS + the published demo platform image, point the CLI at :8081, run --ignored.
+# Nightly + on demand, not per-PR (pulls/boots a multi-container stack).
+on:
+  schedule:
+    - cron: "0 8 * * *" # 08:00 UTC nightly (staggered vs scry-platform's 07:00)
+  workflow_dispatch:
+
+jobs:
+  cli-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Start platform (NATS + demo image, test-token)
+        working-directory: assets/demo
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d nats scry-platform
+      - name: Wait for Management API
+        working-directory: assets/demo
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -sf http://localhost:8081/health; then
+              echo "platform up"; exit 0
+            fi
+            sleep 5
+          done
+          echo "platform did not become healthy" >&2
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs scry-platform >&2 || true
+          exit 1
+      - name: Run server-dependent ci-flow tests
+        env:
+          SCRY_API_URL: http://localhost:8081
+          SCRY_API_TOKEN: test-token
+        run: cargo test --test ci_workflow -- --ignored --test-threads=1
+      - name: Tear down
+        if: always()
+        working-directory: assets/demo
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v
