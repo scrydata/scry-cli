@@ -220,6 +220,24 @@ impl ConnectionResponse {
             }),
         }
     }
+
+    /// Connection URL for a migration command running against a LOCAL tunnel
+    /// bound on `127.0.0.1:<local_port>`. Keeps the shadow's credentials
+    /// (username/password/database) but replaces host/port with the tunnel's
+    /// actual bind — `localhost` is avoided because it resolves to `::1` first
+    /// and the tunnel listens on `127.0.0.1` only.
+    fn tunnel_connection_string(&self, local_port: u16) -> String {
+        match &self.password {
+            Some(pw) => format!(
+                "postgres://{}:{}@127.0.0.1:{}/{}",
+                self.username, pw, local_port, self.database
+            ),
+            None => format!(
+                "postgres://{}@127.0.0.1:{}/{}",
+                self.username, local_port, self.database
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -454,7 +472,7 @@ impl CiCommand {
             .map_err(|e| CliError::Other(e.to_string()))?;
 
         if !quiet {
-            eprintln!("Tunnel open at localhost:{}", port);
+            eprintln!("Tunnel open at 127.0.0.1:{}", port);
             eprintln!("  Note: ~2-10ms added latency per round-trip");
         }
 
@@ -483,8 +501,13 @@ impl CiCommand {
                 }
             }
         } else {
-            // Run command with tunnel, exit when command exits
-            let connection_url = format!("postgres://localhost:{}/postgres", port);
+            // Run command with tunnel, exit when command exits.
+            // Build DATABASE_URL from the shadow's real connection info, pointed at
+            // the local tunnel bind (127.0.0.1:<port>) so the wrapped command can
+            // authenticate without a manual password prompt.
+            let conn_path = format!("/api/v1/shadows/{}/connection", shadow_id);
+            let conn_info: ConnectionResponse = client.get(&conn_path).await?;
+            let connection_url = conn_info.tunnel_connection_string(port);
 
             // Clone values for spawned task
             let base_url = client.base_url().to_string();
@@ -668,7 +691,18 @@ impl CiCommand {
             }
         };
 
-        let connection_url = format!("postgres://localhost:{}/postgres", port);
+        // Build the migration command's DATABASE_URL from the shadow's real
+        // connection info (same endpoint `scry ci connect` uses), pointed at the
+        // local tunnel bind so a psql migration connects without a password prompt.
+        let conn_path = format!("/api/v1/shadows/{}/connection", shadow_id);
+        let conn_info: ConnectionResponse = match client.get(&conn_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                let _: Result<serde_json::Value, _> = client.delete(&unlock_path).await;
+                return Err(e);
+            }
+        };
+        let connection_url = conn_info.tunnel_connection_string(port);
 
         // Clone values for spawned task
         let base_url = client.base_url().to_string();
@@ -1374,6 +1408,29 @@ mod tests {
             "password":"secret","connection_url":"postgres://ignored"}"#;
         let resp: ConnectionResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.connection_string(), "postgres://u:secret@h:5432/db");
+    }
+
+    #[test]
+    fn tunnel_connection_string_uses_loopback_and_credentials() {
+        let json = r#"{"host":"shadow-host","port":5433,"database":"appdb","username":"scry",
+            "password":"s3cret","connection_url":"postgres://scry:s3cret@shadow-host:5433/appdb"}"#;
+        let resp: ConnectionResponse = serde_json::from_str(json).unwrap();
+        // Points at the LOCAL tunnel bind (127.0.0.1:<local_port>), NOT the shadow's
+        // real host/port, but keeps the shadow's user/password/database.
+        assert_eq!(
+            resp.tunnel_connection_string(15432),
+            "postgres://scry:s3cret@127.0.0.1:15432/appdb"
+        );
+    }
+
+    #[test]
+    fn tunnel_connection_string_without_password_omits_credentials_section() {
+        let json = r#"{"host":"h","port":5433,"database":"appdb","username":"scry"}"#;
+        let resp: ConnectionResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            resp.tunnel_connection_string(15500),
+            "postgres://scry@127.0.0.1:15500/appdb"
+        );
     }
 
     #[test]
