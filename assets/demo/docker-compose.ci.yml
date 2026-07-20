@@ -1,0 +1,18 @@
+# CI-only override of the demo stack. The scry-cli integration workflow runs
+# only the Management API (:8081) + NATS — enough for the #[ignore]d
+# tests/ci_workflow.rs tests — and pins the auth token to the value those tests
+# hardcode (test-token, tests/ci_workflow.rs:11) so they authenticate as-is,
+# without any test-code change. The demo image otherwise bakes in "demo-token".
+#
+# It also switches the shadow provider from "docker" to "static": the demo
+# image's default docker provider needs a Docker socket inside the container to
+# boot, but these tests never provision a shadow (they exercise list / not-found
+# paths). The static provider needs no Docker, so the platform starts on a stock
+# runner without docker-in-docker plumbing.
+services:
+  scry-platform:
+    environment:
+      SCRY_PLATFORM_RECEIVER__AUTH_TOKEN: "test-token"
+      SCRY_PLATFORM_RECEIVER__API_KEYS: "test-token"
+      SCRY_PLATFORM_API__AUTH_TOKEN: "test-token"
+      SCRY_PLATFORM_SHADOW__PROVIDER: "static"
