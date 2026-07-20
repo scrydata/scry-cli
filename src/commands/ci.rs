@@ -9,6 +9,7 @@ use crate::repo_config::RepoConfig;
 use crate::resolve::ShadowRef;
 use chrono;
 use clap::Subcommand;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
@@ -205,17 +206,51 @@ struct ConnectionResponse {
     pub connection_url: Option<String>,
 }
 
+/// Characters that must be percent-encoded inside a `postgres://` URI component
+/// (userinfo and path). Encodes RFC 3986 gen-delims + unsafe ASCII so
+/// credentials containing `@`, `/`, `:`, `%`, ... do not corrupt the authority
+/// section. Unreserved (`- . _ ~`) and sub-delims (`+ = & ...`, e.g. base64
+/// padding) are left intact — libpq decodes both.
+const URI_COMPONENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b':')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
 impl ConnectionResponse {
     fn connection_string(&self) -> String {
         match &self.password {
             Some(pw) => format!(
                 "postgres://{}:{}@{}:{}/{}",
-                self.username, pw, self.host, self.port, self.database
+                utf8_percent_encode(&self.username, URI_COMPONENT),
+                utf8_percent_encode(pw, URI_COMPONENT),
+                self.host,
+                self.port,
+                utf8_percent_encode(&self.database, URI_COMPONENT)
             ),
+            // Passthrough: the server-supplied `connection_url` is already
+            // percent-encoded (platform PR #84) — do NOT re-encode it.
             None => self.connection_url.clone().unwrap_or_else(|| {
                 format!(
                     "postgres://{}@{}:{}/{}",
-                    self.username, self.host, self.port, self.database
+                    utf8_percent_encode(&self.username, URI_COMPONENT),
+                    self.host,
+                    self.port,
+                    utf8_percent_encode(&self.database, URI_COMPONENT)
                 )
             }),
         }
@@ -230,11 +265,16 @@ impl ConnectionResponse {
         match &self.password {
             Some(pw) => format!(
                 "postgres://{}:{}@127.0.0.1:{}/{}",
-                self.username, pw, local_port, self.database
+                utf8_percent_encode(&self.username, URI_COMPONENT),
+                utf8_percent_encode(pw, URI_COMPONENT),
+                local_port,
+                utf8_percent_encode(&self.database, URI_COMPONENT)
             ),
             None => format!(
                 "postgres://{}@127.0.0.1:{}/{}",
-                self.username, local_port, self.database
+                utf8_percent_encode(&self.username, URI_COMPONENT),
+                local_port,
+                utf8_percent_encode(&self.database, URI_COMPONENT)
             ),
         }
     }
@@ -1430,6 +1470,46 @@ mod tests {
         assert_eq!(
             resp.tunnel_connection_string(15500),
             "postgres://scry@127.0.0.1:15500/appdb"
+        );
+    }
+
+    #[test]
+    fn tunnel_connection_string_percent_encodes_special_chars() {
+        // Credentials with URI-reserved chars (@ / :) must be percent-encoded
+        // so libpq does not mis-parse the authority section (which corrupts
+        // auth and can trigger an interactive prompt that HANGS unattended CI).
+        let json = r#"{"host":"shadow-host","port":5433,"database":"app/db","username":"user@corp",
+            "password":"p@ss/w:rd","connection_url":"postgres://ignored"}"#;
+        let resp: ConnectionResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            resp.tunnel_connection_string(15432),
+            "postgres://user%40corp:p%40ss%2Fw%3Ard@127.0.0.1:15432/app%2Fdb"
+        );
+    }
+
+    #[test]
+    fn connection_string_percent_encodes_special_chars() {
+        let json = r#"{"host":"shadow-host","port":5433,"database":"app/db","username":"user@corp",
+            "password":"p@ss/w:rd","connection_url":"postgres://ignored"}"#;
+        let resp: ConnectionResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            resp.connection_string(),
+            "postgres://user%40corp:p%40ss%2Fw%3Ard@shadow-host:5433/app%2Fdb"
+        );
+    }
+
+    #[test]
+    fn connection_string_passthrough_url_is_not_reencoded() {
+        // Password-absent branch returns the server-supplied connection_url
+        // verbatim. The server already percent-encodes it (platform PR #84),
+        // so it must NOT be double-encoded here (no %25 from a stray %40).
+        let json = r#"{"host":"h","port":5432,"database":"db","username":"u",
+            "connection_url":"postgres://user%40corp:p%40ss@h:5432/db"}"#;
+        let resp: ConnectionResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.password.is_none());
+        assert_eq!(
+            resp.connection_string(),
+            "postgres://user%40corp:p%40ss@h:5432/db"
         );
     }
 
